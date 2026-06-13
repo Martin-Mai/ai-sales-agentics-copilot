@@ -6,9 +6,12 @@ import time
 
 import requests
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 BASE_URL = "http://localhost:8000"
-CONV_API = "/api/conversations"
-CHAT_STREAM_API = "/chat/stream"
+CONV_API = "/api/v1/conversations"
+CHAT_STREAM_API = "/api/v1/chat/stream"
 USER_ID = f"chat_test_user_{int(time.time())}"
 FAKE_CONV_ID = "00000000-0000-0000-0000-000000000000"
 STREAM_TIMEOUT = 120

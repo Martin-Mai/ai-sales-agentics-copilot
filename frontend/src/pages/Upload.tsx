@@ -79,7 +79,10 @@ function DropZone({
       <input
         type="file"
         accept=".csv"
-        className="absolute inset-0 cursor-pointer opacity-0"
+        disabled={slot.status === 'uploading'}
+        className={`absolute inset-0 opacity-0 ${
+          slot.status === 'uploading' ? 'cursor-not-allowed' : 'cursor-pointer'
+        }`}
         onChange={(e) => {
           const file = e.target.files?.[0];
           if (file) onFile(slot.kind, file);
@@ -109,6 +112,21 @@ function DropZone({
           <FileSpreadsheet className="h-3.5 w-3.5" />
           {slot.file.name} ({(slot.file.size / 1024).toFixed(1)} KB)
         </div>
+      )}
+
+      {slot.status === 'uploading' && slot.kind === 'reviews' && (
+        <div className="mt-4 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+          <p className="font-medium">处理中，请勿退出该窗口</p>
+          <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+            因数据过大需要 2–3 分钟完成，正在生成评论向量索引…
+          </p>
+        </div>
+      )}
+
+      {slot.status === 'uploading' && slot.kind === 'sales' && (
+        <p className="mt-4 text-sm text-brand-600 dark:text-brand-400">
+          正在导入销售数据…
+        </p>
       )}
 
       {slot.status === 'success' && slot.result && (

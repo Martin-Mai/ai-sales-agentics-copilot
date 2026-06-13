@@ -4,12 +4,13 @@ import io
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import insert
 
 from app.database import Review, SalesOrder, get_db
-from app.database.chroma_client import add_comment_to_chroma
+from app.database.chroma_client import add_comment_to_chroma, get_comments_collection
 
 router = APIRouter(prefix="/upload")
 
@@ -112,6 +113,14 @@ async def _read_csv(file: UploadFile) -> pd.DataFrame:
     return await asyncio.to_thread(pd.read_csv, io.BytesIO(content))
 
 
+async def _clear_comments_collection() -> None:
+    collection = await get_comments_collection()
+    result = await asyncio.to_thread(collection.get)
+    ids = result.get("ids") or []
+    if ids:
+        await asyncio.to_thread(collection.delete, ids=ids)
+
+
 async def _write_reviews_to_chroma(records: list[dict]) -> int:
     semaphore = asyncio.Semaphore(CHROMA_CONCURRENCY)
 
@@ -139,6 +148,20 @@ async def _write_reviews_to_chroma(records: list[dict]) -> int:
     return total_written
 
 
+async def _replace_sales_orders(
+    session: AsyncSession,
+    records: list[dict],
+) -> None:
+    """全量覆盖销售订单：先清子表 reviews 与 Chroma 评论，再清父表 sales_orders，最后批量插入。"""
+    async with session.begin():
+        await session.execute(text("DELETE FROM reviews"))
+        await session.flush()
+        await _clear_comments_collection()
+        await session.execute(text("DELETE FROM sales_orders"))
+        if records:
+            await session.execute(insert(SalesOrder).values(records))
+
+
 @router.post("/sales")
 async def upload_sales(
     file: UploadFile = File(...),
@@ -150,17 +173,18 @@ async def upload_sales(
         cleaned = clean_sales_data(df)
         records = cleaned.to_dict(orient="records")
 
-        await session.execute(delete(SalesOrder))
-        if records:
-            stmt = insert(SalesOrder).values(records)
-            await session.execute(stmt)
-        await session.commit()
+        await _replace_sales_orders(session, records)
         return {"inserted": len(records)}
     except ValueError as exc:
-        await session.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"数据库完整性约束冲突: {exc.orig}",
+        ) from exc
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=400, detail=f"数据库操作失败: {exc}") from exc
     except Exception as exc:
-        await session.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -202,6 +226,7 @@ async def upload_reviews(
         records = cleaned.to_dict(orient="records")
 
         await session.execute(delete(Review))
+        await _clear_comments_collection()
         if records:
             stmt = insert(Review).values(records)
             await session.execute(stmt)

@@ -1,10 +1,9 @@
-import axios from 'axios';
+import axios, { type AxiosInstance } from 'axios';
 import type {
   Conversation,
   ConversationResponse,
   Message,
   MessageResponse,
-  StreamEvent,
   UploadReviewsResponse,
   UploadSalesResponse,
 } from '../types';
@@ -15,7 +14,8 @@ const BASE_URL =
 
 const API_PREFIX = '/api/v1';
 
-export const apiClient = axios.create({
+/** Axios 基础实例 — 所有 REST 请求统一走此客户端 */
+export const baseAxios: AxiosInstance = axios.create({
   baseURL: BASE_URL,
   headers: { 'Content-Type': 'application/json' },
   timeout: 60_000,
@@ -30,6 +30,16 @@ export function getUserId(): string {
     localStorage.setItem(USER_ID_KEY, id);
   }
   return id;
+}
+
+/** SSE data 行 JSON 载荷（兼容 LangGraph 新格式与现有 event 格式） */
+interface StreamChunkPayload {
+  content?: string;
+  node_status?: string;
+  text?: string;
+  event?: string;
+  node?: string;
+  tool?: string;
 }
 
 function mapConversation(raw: ConversationResponse): Conversation {
@@ -50,20 +60,154 @@ function mapMessage(raw: MessageResponse): Message {
   };
 }
 
+function resolveNodeStatus(payload: StreamChunkPayload): string | undefined {
+  if (payload.node_status) {
+    return payload.node_status;
+  }
+
+  switch (payload.event) {
+    case 'node_start':
+      if (payload.node === 'planner') return 'thinking_planner';
+      if (payload.node === 'sql_tool') return 'thinking_sql';
+      if (payload.node === 'vector_tool') return 'thinking_vector';
+      if (payload.node === 'insight') return 'generating';
+      return payload.node ? `thinking_${payload.node}` : undefined;
+    case 'planner_decision':
+      if (payload.tool === 'sql_tool') return 'planning_sql';
+      if (payload.tool === 'vector_tool') return 'planning_vector';
+      return 'planning';
+    case 'sql_result':
+      return 'sql_done';
+    case 'reviews':
+      return 'vector_done';
+    default:
+      return undefined;
+  }
+}
+
+function resolveContent(payload: StreamChunkPayload): string {
+  if (typeof payload.content === 'string') {
+    return payload.content;
+  }
+  if (typeof payload.text === 'string') {
+    return payload.text;
+  }
+  return '';
+}
+
+function parseStreamDataLine(line: string): {
+  content: string;
+  nodeStatus?: string;
+} | null {
+  const trimmed = line.trimEnd();
+  if (!trimmed.startsWith('data:')) {
+    return null;
+  }
+
+  const payloadStr = trimmed.slice(5).trimStart();
+  if (!payloadStr || payloadStr === '[DONE]') {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(payloadStr) as StreamChunkPayload;
+    const content = resolveContent(payload);
+    const nodeStatus = resolveNodeStatus(payload);
+    if (!content && !nodeStatus) {
+      return null;
+    }
+    return { content, nodeStatus };
+  } catch {
+    return null;
+  }
+}
+
+/** 将 node_status 映射为 UI 可读文案 */
+export function nodeStatusToLabel(nodeStatus?: string): string | null {
+  if (!nodeStatus) return null;
+
+  switch (nodeStatus) {
+    case 'thinking_planner':
+    case 'planning':
+      return '正在分析您的问题…';
+    case 'planning_sql':
+      return '已规划：SQL 数据查询';
+    case 'planning_vector':
+      return '已规划：评论向量检索';
+    case 'thinking_sql':
+      return '正在查询销售数据库 (SQL)…';
+    case 'thinking_vector':
+      return '正在检索用户评论 (Vector)…';
+    case 'generating':
+    case 'thinking_insight':
+      return '正在生成销售洞察…';
+    case 'sql_done':
+      return '数据库查询完成，正在整合结果…';
+    case 'vector_done':
+      return '评论检索完成，正在整合结果…';
+    default:
+      return '处理中…';
+  }
+}
+
+// ─── 文件上传 ────────────────────────────────────────────────────────────────
+
+const UPLOAD_TIMEOUT_SALES_MS = 120_000;
+const UPLOAD_TIMEOUT_REVIEWS_MS = 600_000;
+
+async function uploadCsv<T>(
+  path: string,
+  file: File,
+  timeoutMs: number,
+): Promise<T> {
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const { data } = await baseAxios.post<T>(path, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: timeoutMs,
+    });
+    return data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const detail = error.response?.data?.detail;
+      throw new Error(
+        typeof detail === 'string' ? detail : (error.message || '上传失败'),
+      );
+    }
+    throw error;
+  }
+}
+
+export async function uploadSales(file: File): Promise<UploadSalesResponse> {
+  return uploadCsv<UploadSalesResponse>(
+    `${API_PREFIX}/upload/sales`,
+    file,
+    UPLOAD_TIMEOUT_SALES_MS,
+  );
+}
+
+export async function uploadReviews(file: File): Promise<UploadReviewsResponse> {
+  return uploadCsv<UploadReviewsResponse>(
+    `${API_PREFIX}/upload/reviews`,
+    file,
+    UPLOAD_TIMEOUT_REVIEWS_MS,
+  );
+}
+
+// ─── 会话管理 ────────────────────────────────────────────────────────────────
+
 export async function fetchConversations(userId: string): Promise<Conversation[]> {
-  const { data } = await apiClient.get<ConversationResponse[]>(
+  const { data } = await baseAxios.get<ConversationResponse[]>(
     `${API_PREFIX}/conversations/user/${userId}`,
   );
   return data.map(mapConversation);
 }
 
-export async function createConversation(
-  userId: string,
-  title = '新会话',
-): Promise<Conversation> {
-  const { data } = await apiClient.post<ConversationResponse>(
+export async function createConversation(title = '新会话'): Promise<Conversation> {
+  const { data } = await baseAxios.post<ConversationResponse>(
     `${API_PREFIX}/conversations`,
-    { user_id: userId, title },
+    { user_id: getUserId(), title },
   );
   return mapConversation(data);
 }
@@ -72,7 +216,7 @@ export async function updateConversationTitle(
   id: string,
   title: string,
 ): Promise<Conversation> {
-  const { data } = await apiClient.put<ConversationResponse>(
+  const { data } = await baseAxios.put<ConversationResponse>(
     `${API_PREFIX}/conversations/${id}`,
     { title },
   );
@@ -80,106 +224,61 @@ export async function updateConversationTitle(
 }
 
 export async function deleteConversation(id: string): Promise<void> {
-  await apiClient.delete(`${API_PREFIX}/conversations/${id}`);
+  await baseAxios.delete(`${API_PREFIX}/conversations/${id}`);
 }
 
 export async function fetchMessages(conversationId: string): Promise<Message[]> {
-  const { data } = await apiClient.get<MessageResponse[]>(
+  const { data } = await baseAxios.get<MessageResponse[]>(
     `${API_PREFIX}/conversations/${conversationId}/messages`,
   );
   return data.map(mapMessage);
 }
 
-export async function uploadSales(file: File): Promise<UploadSalesResponse> {
-  const formData = new FormData();
-  formData.append('file', file);
-  const { data } = await apiClient.post<UploadSalesResponse>(
-    `${API_PREFIX}/upload/sales`,
-    formData,
-    { headers: { 'Content-Type': 'multipart/form-data' } },
-  );
-  return data;
-}
-
-export async function uploadReviews(file: File): Promise<UploadReviewsResponse> {
-  const formData = new FormData();
-  formData.append('file', file);
-  const { data } = await apiClient.post<UploadReviewsResponse>(
-    `${API_PREFIX}/upload/reviews`,
-    formData,
-    { headers: { 'Content-Type': 'multipart/form-data' } },
-  );
-  return data;
-}
-
-function parseSSELine(
-  line: string,
-  currentEvent: string,
-): { event: StreamEvent | null; nextEvent: string } {
-  if (line.startsWith('event:')) {
-    return { event: null, nextEvent: line.slice(6).trim() };
-  }
-  if (line.startsWith('data:')) {
-    const payload = line.slice(5).trim();
-    try {
-      const parsed = JSON.parse(payload) as StreamEvent;
-      if (!parsed.event) {
-        parsed.event = currentEvent;
-      }
-      return { event: parsed, nextEvent: currentEvent };
-    } catch {
-      return {
-        event: { event: currentEvent, text: payload },
-        nextEvent: currentEvent,
-      };
-    }
-  }
-  return { event: null, nextEvent: currentEvent };
-}
+// ─── SSE 流式聊天 ────────────────────────────────────────────────────────────
 
 /**
- * POST SSE 流式聊天 — 使用 fetch + ReadableStream 逐行解析
+ * POST SSE 流式聊天 — 原生 fetch + ReadableStream 逐行解析
+ * 工业级 buffer 处理：防截断 / 防粘包
  */
-export async function sendMessageStream(
+export const sendMessageStream = async (
   conversationId: string,
   userId: string,
   message: string,
-  onChunk: (event: StreamEvent) => void,
+  onChunk: (content: string, nodeStatus?: string) => void,
   onDone: () => void,
-  onError: (error: Error) => void,
-  signal?: AbortSignal,
-): Promise<void> {
+  onError: (error: unknown) => void,
+): Promise<void> => {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
   try {
     const response = await fetch(`${BASE_URL}${API_PREFIX}/chat/stream`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         conversation_id: conversationId,
         user_id: userId,
         message,
       }),
-      signal,
     });
 
     if (!response.ok) {
       let detail = `请求失败 (${response.status})`;
       try {
-        const errBody = await response.json();
+        const errBody = (await response.json()) as { detail?: string };
         detail = errBody.detail ?? detail;
       } catch {
-        /* ignore */
+        /* 非 JSON 错误体，保留默认 detail */
       }
       throw new Error(detail);
     }
 
-    const reader = response.body?.getReader();
-    if (!reader) {
+    if (!response.body) {
       throw new Error('无法读取响应流');
     }
 
+    reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let currentEvent = 'message';
 
     while (true) {
       const { done, value } = await reader.read();
@@ -190,44 +289,28 @@ export async function sendMessageStream(
       buffer = lines.pop() ?? '';
 
       for (const line of lines) {
-        const trimmed = line.trimEnd();
-        if (!trimmed) continue;
-
-        const { event, nextEvent } = parseSSELine(trimmed, currentEvent);
-        currentEvent = nextEvent;
-        if (event) {
-          onChunk(event);
+        const parsed = parseStreamDataLine(line);
+        if (parsed) {
+          onChunk(parsed.content, parsed.nodeStatus);
         }
       }
     }
 
-    onDone();
-  } catch (err) {
-    if (err instanceof DOMException && err.name === 'AbortError') {
-      onDone();
-      return;
+    if (buffer.trim()) {
+      const parsed = parseStreamDataLine(buffer);
+      if (parsed) {
+        onChunk(parsed.content, parsed.nodeStatus);
+      }
     }
-    onError(err instanceof Error ? err : new Error(String(err)));
-  }
-}
 
-export function streamEventToStatus(event: StreamEvent): string | null {
-  switch (event.event) {
-    case 'node_start':
-      if (event.node === 'planner') return '正在分析您的问题…';
-      if (event.node === 'sql_tool') return '正在查询销售数据库 (SQL)…';
-      if (event.node === 'vector_tool') return '正在检索用户评论 (Vector)…';
-      if (event.node === 'insight') return '正在生成销售洞察…';
-      return '处理中…';
-    case 'planner_decision':
-      if (event.tool === 'sql_tool') return '已规划：SQL 数据查询';
-      if (event.tool === 'vector_tool') return '已规划：评论向量检索';
-      return '已规划：直接生成洞察';
-    case 'sql_result':
-      return '数据库查询完成，正在整合结果…';
-    case 'reviews':
-      return '评论检索完成，正在整合结果…';
-    default:
-      return null;
+    onDone();
+  } catch (error) {
+    onError(error);
+  } finally {
+    try {
+      await reader?.cancel();
+    } catch {
+      /* 流已关闭时忽略 */
+    }
   }
-}
+};

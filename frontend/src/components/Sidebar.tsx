@@ -22,6 +22,7 @@ interface SidebarProps {
   isDark: boolean;
   onToggleTheme: () => void;
   loading?: boolean;
+  disabled?: boolean;
 }
 
 function formatDate(dateStr: string): string {
@@ -48,6 +49,7 @@ export default function Sidebar({
   isDark,
   onToggleTheme,
   loading,
+  disabled,
 }: SidebarProps) {
   const location = useLocation();
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -62,6 +64,7 @@ export default function Sidebar({
   }, [conversations, editingId]);
 
   const startEdit = (conv: Conversation) => {
+    if (disabled) return;
     setEditingId(conv.id);
     setEditTitle(conv.title);
   };
@@ -78,10 +81,10 @@ export default function Sidebar({
   };
 
   return (
-    <aside className="flex h-full w-72 shrink-0 flex-col border-r border-slate-200/80 bg-white dark:border-slate-700/80 dark:bg-slate-900">
+    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-slate-200/80 bg-white dark:border-slate-700/80 dark:bg-slate-900">
       <div className="flex items-center justify-between border-b border-slate-200/80 px-4 py-4 dark:border-slate-700/80">
         <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-brand-500 to-indigo-600 text-white text-xs font-bold">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-brand-500 to-indigo-600 text-xs font-bold text-white">
             AI
           </div>
           <span className="font-semibold text-slate-800 dark:text-slate-100">
@@ -102,7 +105,8 @@ export default function Sidebar({
         <button
           type="button"
           onClick={onNew}
-          className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-brand-300 bg-brand-50 px-4 py-2.5 text-sm font-medium text-brand-600 transition hover:border-brand-400 hover:bg-brand-100 dark:border-brand-500/40 dark:bg-brand-500/10 dark:text-brand-300 dark:hover:bg-brand-500/20"
+          disabled={disabled}
+          className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-brand-300 bg-brand-50 px-4 py-2.5 text-sm font-medium text-brand-600 transition hover:border-brand-400 hover:bg-brand-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-brand-500/40 dark:bg-brand-500/10 dark:text-brand-300 dark:hover:bg-brand-500/20"
         >
           <MessageSquarePlus className="h-4 w-4" />
           新建对话
@@ -169,14 +173,16 @@ export default function Sidebar({
                     <button
                       type="button"
                       onClick={() => onSelect(conv.id)}
+                      onDoubleClick={() => startEdit(conv)}
+                      disabled={disabled && !isActive}
                       className={`flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-sm transition ${
                         isActive
                           ? 'bg-brand-50 font-medium text-brand-700 dark:bg-brand-500/15 dark:text-brand-300'
                           : 'text-slate-600 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-slate-800/60'
-                      }`}
+                      } disabled:cursor-not-allowed disabled:opacity-60`}
                     >
                       <span className="min-w-0 flex-1 truncate">{conv.title}</span>
-                      <span className="shrink-0 text-[10px] text-slate-400">
+                      <span className="shrink-0 text-[10px] text-slate-400 group-hover:invisible">
                         {formatDate(conv.updated_at)}
                       </span>
                     </button>
@@ -190,7 +196,8 @@ export default function Sidebar({
                           e.stopPropagation();
                           startEdit(conv);
                         }}
-                        className="rounded-lg bg-white p-1.5 text-slate-500 shadow-sm ring-1 ring-slate-200 hover:text-brand-600 dark:bg-slate-800 dark:ring-slate-600"
+                        disabled={disabled}
+                        className="rounded-lg bg-white p-1.5 text-slate-500 shadow-sm ring-1 ring-slate-200 hover:text-brand-600 disabled:opacity-50 dark:bg-slate-800 dark:ring-slate-600"
                         aria-label="修改标题"
                       >
                         <Pencil className="h-3 w-3" />
@@ -201,7 +208,8 @@ export default function Sidebar({
                           e.stopPropagation();
                           onDelete(conv.id);
                         }}
-                        className="rounded-lg bg-white p-1.5 text-slate-500 shadow-sm ring-1 ring-slate-200 hover:text-red-500 dark:bg-slate-800 dark:ring-slate-600"
+                        disabled={disabled}
+                        className="rounded-lg bg-white p-1.5 text-slate-500 shadow-sm ring-1 ring-slate-200 hover:text-red-500 disabled:opacity-50 dark:bg-slate-800 dark:ring-slate-600"
                         aria-label="删除会话"
                       >
                         <Trash2 className="h-3 w-3" />

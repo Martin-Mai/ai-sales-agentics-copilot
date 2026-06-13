@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import ChatWindow from '../components/ChatWindow';
 import Sidebar from '../components/Sidebar';
 import {
@@ -6,13 +6,13 @@ import {
   deleteConversation,
   fetchConversations,
   fetchMessages,
-  getUserId,
   sendMessageStream,
-  streamEventToStatus,
   updateConversationTitle,
 } from '../services/api';
-import type { Conversation, Message, StreamEvent } from '../types';
+import type { Conversation, Message } from '../types';
 
+const MOCK_USER_ID = 'user_9527';
+const USER_ID_STORAGE_KEY = 'sales_copilot_user_id';
 const THEME_KEY = 'sales_copilot_theme';
 
 function getInitialTheme(): boolean {
@@ -22,18 +22,33 @@ function getInitialTheme(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
 }
 
+function createTempMessage(
+  role: Message['role'],
+  content: string,
+): Message {
+  return {
+    id: `temp-${role}-${Date.now()}`,
+    role,
+    content,
+    timestamp: new Date().toISOString(),
+  };
+}
+
 export default function Chat() {
-  const userId = getUserId();
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [currentConversationId, setCurrentConversationId] = useState<string | null>(
+    null,
+  );
   const [messages, setMessages] = useState<Message[]>([]);
-  const [streamingMessage, setStreamingMessage] = useState<Message | null>(null);
-  const [statusLabel, setStatusLabel] = useState<string | null>(null);
-  const [isStreaming, setIsStreaming] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [activeNodeStatus, setActiveNodeStatus] = useState<string | null>(null);
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [isDark, setIsDark] = useState(getInitialTheme);
-  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem(USER_ID_STORAGE_KEY, MOCK_USER_ID);
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDark);
@@ -43,7 +58,7 @@ export default function Chat() {
   const loadConversations = useCallback(async () => {
     setLoadingConversations(true);
     try {
-      const list = await fetchConversations(userId);
+      const list = await fetchConversations(MOCK_USER_ID);
       setConversations(list);
       return list;
     } catch (err) {
@@ -52,7 +67,7 @@ export default function Chat() {
     } finally {
       setLoadingConversations(false);
     }
-  }, [userId]);
+  }, []);
 
   const loadMessages = useCallback(async (conversationId: string) => {
     setLoadingMessages(true);
@@ -70,37 +85,36 @@ export default function Chat() {
   useEffect(() => {
     void loadConversations().then((list) => {
       if (list.length > 0) {
-        setActiveId(list[0].id);
+        setCurrentConversationId(list[0].id);
       }
     });
   }, [loadConversations]);
 
   useEffect(() => {
-    if (activeId) {
-      void loadMessages(activeId);
+    if (currentConversationId) {
+      void loadMessages(currentConversationId);
     } else {
       setMessages([]);
     }
-  }, [activeId, loadMessages]);
+  }, [currentConversationId, loadMessages]);
 
   const handleNewConversation = async () => {
+    if (isLoading) return;
     try {
-      const conv = await createConversation(userId);
+      const conv = await createConversation('新会话');
       setConversations((prev) => [conv, ...prev]);
-      setActiveId(conv.id);
+      setCurrentConversationId(conv.id);
       setMessages([]);
-      setStreamingMessage(null);
-      setStatusLabel(null);
+      setActiveNodeStatus(null);
     } catch (err) {
       console.error('创建会话失败', err);
     }
   };
 
   const handleSelect = (id: string) => {
-    if (isStreaming) return;
-    setActiveId(id);
-    setStreamingMessage(null);
-    setStatusLabel(null);
+    if (isLoading) return;
+    setCurrentConversationId(id);
+    setActiveNodeStatus(null);
   };
 
   const handleDelete = async (id: string) => {
@@ -109,8 +123,11 @@ export default function Chat() {
       await deleteConversation(id);
       setConversations((prev) => {
         const next = prev.filter((c) => c.id !== id);
-        if (activeId === id) {
-          setActiveId(next[0]?.id ?? null);
+        if (currentConversationId === id) {
+          setCurrentConversationId(next[0]?.id ?? null);
+          if (!next[0]) {
+            setMessages([]);
+          }
         }
         return next;
       });
@@ -130,66 +147,51 @@ export default function Chat() {
     }
   };
 
+  const appendAssistantContent = (content: string) => {
+    setMessages((prev) => {
+      const next = [...prev];
+      const lastIndex = next.length - 1;
+      const last = next[lastIndex];
+      if (!last || last.role !== 'assistant') return prev;
+      next[lastIndex] = { ...last, content: last.content + content };
+      return next;
+    });
+  };
+
   const handleSend = async (text: string) => {
-    let conversationId = activeId;
+    let conversationId = currentConversationId;
 
     if (!conversationId) {
       try {
-        const conv = await createConversation(userId, text.slice(0, 30));
+        const conv = await createConversation(text.slice(0, 30));
         setConversations((prev) => [conv, ...prev]);
         conversationId = conv.id;
-        setActiveId(conv.id);
+        setCurrentConversationId(conv.id);
       } catch (err) {
         console.error('创建会话失败', err);
         return;
       }
     }
 
-    const now = new Date().toISOString();
-    const userMsg: Message = {
-      id: `temp-user-${Date.now()}`,
-      role: 'user',
-      content: text,
-      timestamp: now,
-    };
+    const userMsg = createTempMessage('user', text);
+    const assistantPlaceholder = createTempMessage('assistant', '');
 
-    const assistantPlaceholder: Message = {
-      id: `temp-assistant-${Date.now()}`,
-      role: 'assistant',
-      content: '',
-      timestamp: now,
-    };
+    setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
+    setIsLoading(true);
+    setActiveNodeStatus(null);
 
-    setMessages((prev) => [...prev, userMsg]);
-    setStreamingMessage(assistantPlaceholder);
-    setStatusLabel('正在分析您的问题…');
-    setIsStreaming(true);
-
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    let accumulated = '';
-
-    const handleChunk = (event: StreamEvent) => {
-      const status = streamEventToStatus(event);
-      if (status) {
-        setStatusLabel(status);
+    const handleChunk = (content: string, nodeStatus?: string) => {
+      if (nodeStatus) {
+        setActiveNodeStatus(nodeStatus);
       }
-
-      if (event.event === 'text_chunk' && event.text) {
-        accumulated += event.text;
-        setStreamingMessage((prev) =>
-          prev ? { ...prev, content: accumulated } : prev,
-        );
+      if (content) {
+        appendAssistantContent(content);
       }
     };
 
     const handleDone = async () => {
-      setIsStreaming(false);
-      setStatusLabel(null);
-      setStreamingMessage(null);
-
+      setActiveNodeStatus(null);
+      setIsLoading(false);
       if (conversationId) {
         await loadMessages(conversationId);
         const list = await loadConversations();
@@ -197,39 +199,43 @@ export default function Chat() {
       }
     };
 
-    const handleError = (error: Error) => {
-      setIsStreaming(false);
-      setStatusLabel(null);
-      setStreamingMessage(null);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `err-${Date.now()}`,
-          role: 'system',
-          content: error.message,
-          timestamp: new Date().toISOString(),
-        },
-      ]);
+    const handleError = (error: unknown) => {
+      setActiveNodeStatus(null);
+      setIsLoading(false);
+      const errorText =
+        error instanceof Error ? error.message : '发送失败，请稍后重试';
+      setMessages((prev) => {
+        const withoutEmptyAssistant =
+          prev.length > 0 && prev[prev.length - 1].role === 'assistant' &&
+          prev[prev.length - 1].content === ''
+            ? prev.slice(0, -1)
+            : prev;
+        return [
+          ...withoutEmptyAssistant,
+          createTempMessage('system', errorText),
+        ];
+      });
     };
 
     await sendMessageStream(
       conversationId,
-      userId,
+      MOCK_USER_ID,
       text,
       handleChunk,
       handleDone,
       handleError,
-      controller.signal,
     );
   };
 
-  const activeConversation = conversations.find((c) => c.id === activeId);
+  const activeConversation = conversations.find(
+    (c) => c.id === currentConversationId,
+  );
 
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar
         conversations={conversations}
-        activeId={activeId}
+        activeId={currentConversationId}
         onSelect={handleSelect}
         onNew={handleNewConversation}
         onDelete={handleDelete}
@@ -237,19 +243,18 @@ export default function Chat() {
         isDark={isDark}
         onToggleTheme={() => setIsDark((d) => !d)}
         loading={loadingConversations}
+        disabled={isLoading}
       />
       <main className="flex flex-1 flex-col overflow-hidden">
-        {loadingMessages && messages.length === 0 && activeId ? (
+        {loadingMessages && messages.length === 0 && currentConversationId ? (
           <div className="flex flex-1 items-center justify-center text-sm text-slate-400">
             加载消息中…
           </div>
         ) : (
           <ChatWindow
             messages={messages}
-            streamingMessage={streamingMessage}
-            statusLabel={statusLabel}
-            isStreaming={isStreaming}
-            disabled={false}
+            isLoading={isLoading}
+            activeNodeStatus={activeNodeStatus}
             onSend={handleSend}
             conversationTitle={activeConversation?.title}
           />

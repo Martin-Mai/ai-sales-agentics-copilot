@@ -4,8 +4,11 @@ import time
 
 import requests
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 BASE_URL = "http://localhost:8000"
-API_PREFIX = "/api/conversations"
+API_PREFIX = "/api/v1/conversations"
 USER_ID = f"test_user_{int(time.time())}"
 FAKE_CONV_ID = "00000000-0000-0000-0000-000000000000"
 

@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+python-multipart
+sqlalchemy
+asyncmy
+chromadb
+sentence-transformers
+openai
+langgraph
+pandas
+faker
+pydantic-settings
+python-dotenv
+faker
+requests
+sse-starlette  
+cryptography

@@ -9,7 +9,7 @@ import {
   sendMessageStream,
   updateConversationTitle,
 } from '../services/api';
-import type { Conversation, Message } from '../types';
+import type { Conversation, Message, ChartSpec } from '../types';
 
 const MOCK_USER_ID = 'user_9527';
 const USER_ID_STORAGE_KEY = 'sales_copilot_user_id';
@@ -158,6 +158,17 @@ export default function Chat() {
     });
   };
 
+  const appendAssistantChart = (chartSpec: ChartSpec) => {
+    setMessages((prev) => {
+      const next = [...prev];
+      const lastIndex = next.length - 1;
+      const last = next[lastIndex];
+      if (!last || last.role !== 'assistant') return prev;
+      next[lastIndex] = { ...last, chart: chartSpec };
+      return next;
+    });
+  };
+
   const handleSend = async (text: string) => {
     let conversationId = currentConversationId;
 
@@ -180,9 +191,16 @@ export default function Chat() {
     setIsLoading(true);
     setActiveNodeStatus(null);
 
-    const handleChunk = (content: string, nodeStatus?: string) => {
+    const handleChunk = (
+      content: string,
+      nodeStatus?: string,
+      chartSpec?: ChartSpec,
+    ) => {
       if (nodeStatus) {
         setActiveNodeStatus(nodeStatus);
+      }
+      if (chartSpec) {
+        appendAssistantChart(chartSpec);
       }
       if (content) {
         appendAssistantContent(content);

@@ -51,9 +51,9 @@ class SQLIntent(BaseModel):
         ..., description="目标统计列"
     )
     aggregation: Optional[str] = Field(None, description="别名或辅助聚合描述")
-    group_by: Optional[Literal["region", "product_category", "channel"]] = Field(
-        None, description="分组维度"
-    )
+    group_by: Optional[
+        Literal["region", "product_category", "channel", "month", "order_date"]
+    ] = Field(None, description="分组维度")
     filters: list[dict] = Field(
         default_factory=list,
         description="过滤条件，格式如 [{'column': 'region', 'operator': '==', 'value': '华东'}]",
@@ -150,6 +150,36 @@ class SQLTool(BaseTool):
 
         agg_fn = self._AGG_FUNCS[input_data.operation]
         target_col = getattr(SalesOrder, input_data.target_column)
+
+        if input_data.group_by == "month":
+            month_col = extract("month", SalesOrder.order_date)
+            stmt = (
+                select(month_col, agg_fn(target_col))
+                .group_by(month_col)
+                .order_by(month_col)
+            )
+            stmt = self._apply_filters(stmt, input_data.filters)
+            result = await self.session.execute(stmt)
+            rows = result.all()
+            return {
+                f"{int(row[0])}月": float(row[1]) if row[1] is not None else 0.0
+                for row in rows
+            }
+
+        if input_data.group_by == "order_date":
+            date_col = SalesOrder.order_date
+            stmt = (
+                select(date_col, agg_fn(target_col))
+                .group_by(date_col)
+                .order_by(date_col)
+            )
+            stmt = self._apply_filters(stmt, input_data.filters)
+            result = await self.session.execute(stmt)
+            rows = result.all()
+            return {
+                str(row[0]): float(row[1]) if row[1] is not None else 0.0
+                for row in rows
+            }
 
         if input_data.group_by:
             group_col = getattr(SalesOrder, input_data.group_by)

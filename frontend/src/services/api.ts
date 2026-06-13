@@ -1,5 +1,6 @@
 import axios, { type AxiosInstance } from 'axios';
 import type {
+  ChartSpec,
   Conversation,
   ConversationResponse,
   Message,
@@ -7,6 +8,7 @@ import type {
   UploadReviewsResponse,
   UploadSalesResponse,
 } from '../types';
+import { parseMessageContent } from '../utils/chartMessage';
 
 const BASE_URL =
   import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '') ||
@@ -40,6 +42,7 @@ interface StreamChunkPayload {
   event?: string;
   node?: string;
   tool?: string;
+  data?: ChartSpec | unknown;
 }
 
 function mapConversation(raw: ConversationResponse): Conversation {
@@ -52,11 +55,13 @@ function mapConversation(raw: ConversationResponse): Conversation {
 }
 
 function mapMessage(raw: MessageResponse): Message {
+  const { chart, content } = parseMessageContent(raw.content);
   return {
     id: raw.id,
     role: raw.role,
-    content: raw.content,
+    content,
     timestamp: raw.timestamp,
+    chart,
   };
 }
 
@@ -70,6 +75,7 @@ function resolveNodeStatus(payload: StreamChunkPayload): string | undefined {
       if (payload.node === 'planner') return 'thinking_planner';
       if (payload.node === 'sql_tool') return 'thinking_sql';
       if (payload.node === 'vector_tool') return 'thinking_vector';
+      if (payload.node === 'chart_spec') return 'generating_chart';
       if (payload.node === 'insight') return 'generating';
       return payload.node ? `thinking_${payload.node}` : undefined;
     case 'planner_decision':
@@ -78,6 +84,8 @@ function resolveNodeStatus(payload: StreamChunkPayload): string | undefined {
       return 'planning';
     case 'sql_result':
       return 'sql_done';
+    case 'chart_spec':
+      return 'chart_done';
     case 'reviews':
       return 'vector_done';
     default:
@@ -95,9 +103,17 @@ function resolveContent(payload: StreamChunkPayload): string {
   return '';
 }
 
+function resolveChartSpec(payload: StreamChunkPayload): ChartSpec | undefined {
+  if (payload.event !== 'chart_spec' || !payload.data) {
+    return undefined;
+  }
+  return payload.data as ChartSpec;
+}
+
 function parseStreamDataLine(line: string): {
   content: string;
   nodeStatus?: string;
+  chartSpec?: ChartSpec;
 } | null {
   const trimmed = line.trimEnd();
   if (!trimmed.startsWith('data:')) {
@@ -113,10 +129,11 @@ function parseStreamDataLine(line: string): {
     const payload = JSON.parse(payloadStr) as StreamChunkPayload;
     const content = resolveContent(payload);
     const nodeStatus = resolveNodeStatus(payload);
-    if (!content && !nodeStatus) {
+    const chartSpec = resolveChartSpec(payload);
+    if (!content && !nodeStatus && !chartSpec) {
       return null;
     }
-    return { content, nodeStatus };
+    return { content, nodeStatus, chartSpec };
   } catch {
     return null;
   }
@@ -143,6 +160,8 @@ export function nodeStatusToLabel(nodeStatus?: string): string | null {
       return '正在生成销售洞察…';
     case 'sql_done':
       return '数据库查询完成，正在整合结果…';
+    case 'chart_done':
+      return '图表已生成，正在撰写洞察…';
     case 'vector_done':
       return '评论检索完成，正在整合结果…';
     default:
@@ -244,7 +263,11 @@ export const sendMessageStream = async (
   conversationId: string,
   userId: string,
   message: string,
-  onChunk: (content: string, nodeStatus?: string) => void,
+  onChunk: (
+    content: string,
+    nodeStatus?: string,
+    chartSpec?: ChartSpec,
+  ) => void,
   onDone: () => void,
   onError: (error: unknown) => void,
 ): Promise<void> => {
@@ -291,7 +314,7 @@ export const sendMessageStream = async (
       for (const line of lines) {
         const parsed = parseStreamDataLine(line);
         if (parsed) {
-          onChunk(parsed.content, parsed.nodeStatus);
+          onChunk(parsed.content, parsed.nodeStatus, parsed.chartSpec);
         }
       }
     }
@@ -299,7 +322,7 @@ export const sendMessageStream = async (
     if (buffer.trim()) {
       const parsed = parseStreamDataLine(buffer);
       if (parsed) {
-        onChunk(parsed.content, parsed.nodeStatus);
+        onChunk(parsed.content, parsed.nodeStatus, parsed.chartSpec);
       }
     }
 

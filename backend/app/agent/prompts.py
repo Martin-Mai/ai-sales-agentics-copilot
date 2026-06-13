@@ -13,7 +13,7 @@ ALLOWED_COLUMNS = {
 
 ALLOWED_AGGREGATIONS = {"sum", "mean", "count", "min", "max"}
 
-ALLOWED_GROUP_BY = {"region", "product_category", "channel"}
+ALLOWED_GROUP_BY = {"region", "product_category", "channel", "month", "order_date"}
 
 ALLOWED_TARGET_COLUMNS = {"revenue", "quantity"}
 
@@ -27,7 +27,7 @@ PLANNER_PROMPT_TEMPLATE = """你是一个销售分析系统的任务规划器。
 ## 数据库白名单字段
 - 可查询列：{allowed_columns}
 - 可聚合操作：{allowed_aggregations}
-- 可分组维度：region（区域）、product_category（品类）、channel（渠道）
+- 可分组维度：region（区域）、product_category（品类）、channel（渠道）、month（月份）、order_date（日期）
 - 可统计列：revenue（销售额）、quantity（销量）
 
 ## 向量库说明
@@ -57,7 +57,10 @@ SQL_INTENT_PROMPT_TEMPLATE = """你是数据分析意图解析器。将用户的
 ## 字段说明
 - operation: sum / mean / count / min / max
 - target_column: revenue 或 quantity
-- group_by: region / product_category / channel（可选，不填则为 null）
+- group_by: region / product_category / channel / month / order_date（可选，不填则为 null）
+  - month：按订单月份聚合，适用于月度趋势、各月对比
+  - order_date：按具体日期聚合，适用于日度走势
+  - 问「趋势/走势/变化/各月/每月」时优先使用 month 或 order_date
 - filters: [{{"column": "列名", "operator": "==", "value": "值"}}]（可选，无过滤则为 []）
   日期过滤可用 operator: month / year / day
 
@@ -69,8 +72,44 @@ SQL_INTENT_PROMPT_TEMPLATE = """你是数据分析意图解析器。将用户的
     "operation": "sum" | "mean" | "count" | "min" | "max",
     "target_column": "revenue" | "quantity",
     "aggregation": "可选字符串或 null",
-    "group_by": "region" | "product_category" | "channel" | null,
+    "group_by": "region" | "product_category" | "channel" | "month" | "order_date" | null,
     "filters": []
+}}"""
+
+CHART_PLANNER_PROMPT_TEMPLATE = """你是销售数据可视化助手。根据用户问题与 SQL 分组统计结果，选择合适图表类型并生成标题与轴标签。
+
+## 用户问题
+{user_query}
+
+## SQL 分组维度
+{group_by_hint}
+
+## SQL 分组结果（类别 → 数值）
+{sql_result}
+
+## 数据点数量
+{category_count}
+
+## 图表类型选择规则
+- **line（折线图）**：时间序列趋势、走势、波动、增减变化；当 group_by 为 month 或 order_date 时优先选 line
+- **bar（柱状图）**：类别之间的数值大小对比、排名、哪个更高/更低
+- **pie（扇形图）**：各部分占整体的比例、构成、份额、占比（仅当类别数量 2–8 个且非时间序列时适合）
+- 用户明确指定图表类型时，优先遵循用户意图
+- 时间序列数据（month/order_date）不要选 pie
+- 类别超过 8 个时，即使问占比也应选 bar
+
+## 输出字段说明
+- chart_type: "bar" | "pie" | "line"
+- title: 简洁贴合用户问题（如「2024年各月销售额趋势」「各区域销售额占比」）
+- x_label: 横轴含义（如「月份」「日期」「区域」）
+- y_label: 指标名称（如「销售额」「销量」）
+
+你必须返回一个合法的 JSON 对象，严禁包含任何 Markdown 代码块标签，结构如下：
+{{
+    "chart_type": "bar" | "pie" | "line",
+    "title": "图表标题",
+    "x_label": "横轴标签",
+    "y_label": "指标标签"
 }}"""
 
 INSIGHT_PROMPT_TEMPLATE = """你是一位资深销售分析顾问。请基于以下信息，为用户生成一份具备「数据支撑 + 用户心声」的深度商业洞察报告。
@@ -79,6 +118,7 @@ INSIGHT_PROMPT_TEMPLATE = """你是一位资深销售分析顾问。请基于以
 {user_query}
 
 {context_section}
+{chart_section}
 ## SQL 统计结果
 {sql_result}
 
@@ -87,7 +127,7 @@ INSIGHT_PROMPT_TEMPLATE = """你是一位资深销售分析顾问。请基于以
 
 ## 输出要求
 1. **报告时间基准**：必须从用户问题中提取时间范围（如“8月”、“Q3”等），或从 SQL 结果中的 `order_date` 字段推断出数据所属的月份/季度。报告的开头必须明确写出“报告时间：<实际数据所属时间>”。严禁使用当前系统日期或虚构日期。
-2. **关键发现**：用具体数字说话，引用 SQL 结果中的关键指标。
+2. **关键发现**：用具体数字说话，引用 SQL 结果中的关键指标。若已生成图表，可引用「如上所示」并解读，不必重复罗列全部数值。
 3. **用户心声解读**：结合评论中的情感与诉求，解释数据背后的原因。
 4. **行动建议**：给出 2-3 条可落地的业务建议。
 

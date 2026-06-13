@@ -11,6 +11,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import type { Message } from '../types';
+import ChartCard from './ChartCard';
 
 interface MessageItemProps {
   message: Message;
@@ -38,6 +39,9 @@ export function nodeStatusToDisplayLabel(nodeStatus?: string | null): string | n
     case 'generating':
     case 'thinking_insight':
       return '✨ 正在生成销售洞察…';
+    case 'generating_chart':
+    case 'chart_done':
+      return '📊 正在生成数据图表…';
     default:
       if (nodeStatus.includes('sql')) {
         return '🔍 正在分析多维销售数据库…';
@@ -90,6 +94,9 @@ function StatusCardIcon({ label }: { label: string }) {
     return <Search className="h-4 w-4 shrink-0" />;
   }
   if (label.includes('洞察') || label.includes('✨')) {
+    return <Sparkles className="h-4 w-4 shrink-0" />;
+  }
+  if (label.includes('图表') || label.includes('📊')) {
     return <Sparkles className="h-4 w-4 shrink-0" />;
   }
   return <Loader2 className="h-4 w-4 shrink-0 animate-spin" />;
@@ -178,12 +185,14 @@ export default function MessageItem({
             <p className="whitespace-pre-wrap">{message.content}</p>
           ) : (
             <>
-              {statusLabel && isStreaming && !message.content && (
+              {statusLabel && isStreaming && !message.content && !message.chart && (
                 <div className="flex items-center gap-3 rounded-xl border border-brand-200/50 bg-gradient-to-r from-brand-50 to-indigo-50 px-4 py-3 text-sm text-brand-700 dark:border-brand-500/30 dark:from-brand-500/10 dark:to-indigo-500/10 dark:text-brand-300">
                   <StatusCardIcon label={statusLabel} />
                   <span className="animate-pulse-soft">{statusLabel}</span>
                 </div>
               )}
+
+              {message.chart && <ChartCard spec={message.chart} />}
 
               {message.content ? (
                 <div className="markdown-body">

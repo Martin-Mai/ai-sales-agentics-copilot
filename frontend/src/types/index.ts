@@ -1,5 +1,20 @@
 export type MessageRole = 'user' | 'assistant' | 'system';
 
+export type ChartType = 'bar' | 'pie' | 'line';
+
+export interface ChartDataPoint {
+  label: string;
+  value: number;
+}
+
+export interface ChartSpec {
+  type: ChartType;
+  title: string;
+  x_label: string;
+  y_label: string;
+  data: ChartDataPoint[];
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -12,6 +27,7 @@ export interface Message {
   role: MessageRole;
   content: string;
   timestamp: string;
+  chart?: ChartSpec;
 }
 
 export interface UserInfo {
@@ -43,6 +59,7 @@ export type StreamEventType =
   | 'planner_decision'
   | 'sql_result'
   | 'reviews'
+  | 'chart_spec'
   | 'text_chunk'
   | 'message';
 

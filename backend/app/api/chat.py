@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
+from app.agent.charts import serialize_assistant_content
 from app.agent.graph import agent_graph
 from app.database import get_db
 from app.database.mysql_client import AsyncSessionLocal
@@ -68,14 +69,17 @@ async def chat_stream(
         "messages": history,
         "memories": [],
         "sql_result": None,
+        "sql_group_by": None,
         "reviews": [],
         "insight": "",
+        "chart_spec": None,
         "step_count": 0,
         "error": None,
     }
 
     queue: asyncio.Queue = asyncio.Queue()
     insight_buffer: list[str] = []
+    chart_state: dict[str, dict | None] = {"spec": None}
 
     async def run_agent() -> None:
         try:
@@ -86,6 +90,8 @@ async def chat_stream(
             insight = final_state.get("insight", "")
             if insight and not insight_buffer:
                 insight_buffer.append(insight)
+            if final_state.get("chart_spec") and not chart_state["spec"]:
+                chart_state["spec"] = final_state["chart_spec"]
         except Exception as exc:
             error_msg = f"处理失败: {exc}"
             insight_buffer.clear()
@@ -104,6 +110,8 @@ async def chat_stream(
                 event_type = item.get("event", "message")
                 if event_type == "text_chunk":
                     insight_buffer.append(item.get("text", ""))
+                elif event_type == "chart_spec" and item.get("data"):
+                    chart_state["spec"] = item["data"]
                 yield {
                     "event": event_type,
                     "data": json.dumps(item, ensure_ascii=False),
@@ -116,13 +124,18 @@ async def chat_stream(
             if not assistant_content:
                 assistant_content = "处理失败: 未生成有效回复"
 
+            persisted_content = serialize_assistant_content(
+                chart_state["spec"],
+                assistant_content,
+            )
+
             try:
                 async with AsyncSessionLocal() as persist_session:
                     await _repository.add_message(
                         persist_session,
                         conversation_id=payload.conversation_id,
                         role="assistant",
-                        content=assistant_content,
+                        content=persisted_content,
                     )
                 await session_cache.invalidate_conversation(payload.conversation_id)
             except Exception:

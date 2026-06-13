@@ -10,9 +10,23 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 from typing_extensions import NotRequired, TypedDict
 
+from app.agent.charts import (
+    build_bar_chart_spec,
+    build_chart_spec,
+    build_line_chart_spec,
+    chart_type_label,
+    group_by_hint_text,
+    infer_x_label,
+    infer_y_label,
+    is_chartable_sql_result,
+    is_time_series_group_by,
+    resolve_chart_type,
+    sql_result_to_data_points,
+)
 from app.agent.prompts import (
     ALLOWED_AGGREGATIONS,
     ALLOWED_COLUMNS,
+    CHART_PLANNER_PROMPT_TEMPLATE,
     INSIGHT_PROMPT_TEMPLATE,
     PLANNER_PROMPT_TEMPLATE,
     SQL_INTENT_PROMPT_TEMPLATE,
@@ -36,8 +50,10 @@ class AgentState(TypedDict):
     messages: list[dict]
     memories: list[str]
     sql_result: Any
+    sql_group_by: Optional[str]
     reviews: list[str]
     insight: str
+    chart_spec: Any
     step_count: int
     error: Optional[str]
     planned_tool: NotRequired[str]
@@ -48,6 +64,15 @@ class PlannerOutput(BaseModel):
         ..., description="下一步调用的工具或直接输出洞察"
     )
     reason: str = Field(..., description="选择该路由的商业逻辑决策原因")
+
+
+class ChartPlannerOutput(BaseModel):
+    chart_type: Literal["bar", "pie", "line"] = Field(
+        "bar", description="图表类型：bar 对比，pie 占比，line 趋势"
+    )
+    title: str = Field(..., description="图表标题")
+    x_label: str = Field("类别", description="分类维度标签")
+    y_label: str = Field("数值", description="指标标签")
 
 
 def _get_queue(config: RunnableConfig) -> asyncio.Queue | None:
@@ -162,10 +187,12 @@ async def sql_node(state: AgentState, config: RunnableConfig) -> AgentState:
             tool = SQLTool(session)
             result = await tool.run(intent)
         state["sql_result"] = result
+        state["sql_group_by"] = intent.group_by
         state["error"] = None
         await _emit_event(config, {"event": "sql_result", "data": result})
     except Exception as exc:
         state["sql_result"] = None
+        state["sql_group_by"] = None
         state["error"] = str(exc)
 
     return state
@@ -189,6 +216,64 @@ async def vector_node(state: AgentState, config: RunnableConfig) -> AgentState:
     return state
 
 
+async def chart_node(state: AgentState, config: RunnableConfig) -> AgentState:
+    await _emit_event(config, {"event": "node_start", "node": "chart_spec"})
+    state["step_count"] = state.get("step_count", 0) + 1
+
+    sql_result = state.get("sql_result")
+    if not is_chartable_sql_result(sql_result):
+        state["chart_spec"] = None
+        return state
+
+    group_by = state.get("sql_group_by")
+    data_points = sql_result_to_data_points(sql_result, group_by=group_by)
+    sql_display = json.dumps(sql_result, ensure_ascii=False, indent=2)
+
+    prompt = CHART_PLANNER_PROMPT_TEMPLATE.format(
+        user_query=state["user_query"],
+        group_by_hint=group_by_hint_text(group_by),
+        sql_result=sql_display,
+        category_count=len(data_points),
+    )
+
+    try:
+        output = await _json_mode_completion(
+            [{"role": "user", "content": prompt}],
+            ChartPlannerOutput,
+        )
+        y_label = output.y_label or infer_y_label(state["user_query"])
+        default_x_label = output.x_label or infer_x_label(group_by)
+        chart_type = resolve_chart_type(
+            user_query=state["user_query"],
+            llm_chart_type=output.chart_type,
+            category_count=len(data_points),
+            group_by=group_by,
+        )
+        spec = build_chart_spec(
+            chart_type,
+            title=output.title,
+            data_points=data_points,
+            x_label=default_x_label,
+            y_label=y_label,
+        )
+        state["chart_spec"] = spec
+        state["error"] = None
+        await _emit_event(config, {"event": "chart_spec", "data": spec})
+    except Exception as exc:
+        fallback_type = "line" if is_time_series_group_by(group_by) else "bar"
+        fallback_builder = build_line_chart_spec if fallback_type == "line" else build_bar_chart_spec
+        state["chart_spec"] = fallback_builder(
+            title="数据趋势" if fallback_type == "line" else "数据对比",
+            data_points=data_points,
+            x_label=infer_x_label(group_by),
+            y_label=infer_y_label(state["user_query"]),
+        )
+        state["error"] = str(exc)
+        await _emit_event(config, {"event": "chart_spec", "data": state["chart_spec"]})
+
+    return state
+
+
 async def insight_node(state: AgentState, config: RunnableConfig) -> AgentState:
     await _emit_event(config, {"event": "node_start", "node": "insight"})
     state["step_count"] = state.get("step_count", 0) + 1
@@ -206,9 +291,22 @@ async def insight_node(state: AgentState, config: RunnableConfig) -> AgentState:
         else "无"
     )
 
+    chart_spec = state.get("chart_spec")
+    if chart_spec:
+        type_label = chart_type_label(chart_spec.get("type", "bar"))
+        chart_section = (
+            f"## 已生成图表\n"
+            f"类型：{type_label}\n"
+            f"标题：{chart_spec.get('title', '数据对比')}\n"
+            f"（用户界面已展示{type_label}，文字中可引用「如上所示」）\n"
+        )
+    else:
+        chart_section = ""
+
     prompt = INSIGHT_PROMPT_TEMPLATE.format(
         user_query=state["user_query"],
         context_section=context_section,
+        chart_section=chart_section,
         sql_result=sql_display_str,
         reviews=reviews_display,
     )
@@ -250,10 +348,18 @@ def route_after_planner(state: AgentState) -> Literal["sql_tool", "vector_tool",
     return "insight"
 
 
-def route_after_sql(state: AgentState) -> Literal["vector_tool", "insight"]:
+def route_after_sql(state: AgentState) -> Literal["vector_tool", "chart_spec", "insight"]:
     query = state["user_query"]
     if any(kw in query for kw in REVIEW_KEYWORDS) and not state.get("reviews"):
         return "vector_tool"
+    if is_chartable_sql_result(state.get("sql_result")):
+        return "chart_spec"
+    return "insight"
+
+
+def route_after_vector(state: AgentState) -> Literal["chart_spec", "insight"]:
+    if is_chartable_sql_result(state.get("sql_result")):
+        return "chart_spec"
     return "insight"
 
 
@@ -263,6 +369,7 @@ def build_graph():
     workflow.add_node("planner", planner_node)
     workflow.add_node("sql_tool", sql_node)
     workflow.add_node("vector_tool", vector_node)
+    workflow.add_node("chart_spec", chart_node)
     workflow.add_node("insight", insight_node)
 
     workflow.set_entry_point("planner")
@@ -274,9 +381,14 @@ def build_graph():
     workflow.add_conditional_edges(
         "sql_tool",
         route_after_sql,
-        {"vector_tool": "vector_tool", "insight": "insight"},
+        {"vector_tool": "vector_tool", "chart_spec": "chart_spec", "insight": "insight"},
     )
-    workflow.add_edge("vector_tool", "insight")
+    workflow.add_conditional_edges(
+        "vector_tool",
+        route_after_vector,
+        {"chart_spec": "chart_spec", "insight": "insight"},
+    )
+    workflow.add_edge("chart_spec", "insight")
     workflow.add_edge("insight", END)
 
     return workflow.compile()

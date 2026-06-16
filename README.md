@@ -39,44 +39,6 @@
 
 ---
 
-## 产品预览
-
-### 可视化数据分析
-
-#### 1. 饼状图对比
-
-![饼状图对比](product-display-img/饼状图对比.jpg)
-
-#### 2. 曲线图趋势
-
-![曲线图趋势](product-display-img/曲线图趋势.jpg)
-
-#### 3. 柱状图分布
-
-![柱状图分布](product-display-img/柱状图分布.jpg)
-
-### 智能分析
-
-#### 4. 用户心声分析
-
-![用户心声分析](product-display-img/用户心声分析.jpg)
-
-#### 5. 行动建议
-
-![行动建议](product-display-img/行动建议.jpg)
-
-### 其他
-
-#### 6. 数据上传界面
-
-![数据上传界面](product-display-img/数据上传界面.jpg)
-
-#### 7. 边界测试
-
-![边界测试](product-display-img/边界测试.jpg)
-
----
-
 ## 项目结构
 
 ```text
@@ -154,6 +116,44 @@ LLM **不直接生成 SQL 字符串**，而是输出受 Pydantic 约束的查询
 
 - **销售数据（MySQL）**：CSV 上传后全量覆盖写入 `sales_orders` 表
 - **评论数据（MySQL + ChromaDB）**：MySQL 批量插入 `reviews` 表；向量写入 Chroma 时按 **500 条分块**，并以 **asyncio 并发（10 路）** 提升效率
+
+---
+
+## 产品预览
+
+### 可视化数据分析
+
+#### 1. 饼状图对比
+
+![饼状图对比](product-display-img/饼状图对比.jpg)
+
+#### 2. 曲线图趋势
+
+![曲线图趋势](product-display-img/曲线图趋势.jpg)
+
+#### 3. 柱状图分布
+
+![柱状图分布](product-display-img/柱状图分布.jpg)
+
+### 智能分析
+
+#### 4. 用户心声分析
+
+![用户心声分析](product-display-img/用户心声分析.jpg)
+
+#### 5. 行动建议
+
+![行动建议](product-display-img/行动建议.jpg)
+
+### 其他
+
+#### 6. 数据上传界面
+
+![数据上传界面](product-display-img/数据上传界面.jpg)
+
+#### 7. 边界测试
+
+![边界测试](product-display-img/边界测试.jpg)
 
 ---
 
@@ -358,44 +358,6 @@ Powered by a **LangGraph** multi-node Agent workflow, the system orchestrates **
 
 ---
 
-## Product Preview
-
-### Data Visualization
-
-#### 1. Pie Chart Comparison
-
-![Pie Chart Comparison](product-display-img/饼状图对比.jpg)
-
-#### 2. Line Chart Trend
-
-![Line Chart Trend](product-display-img/曲线图趋势.jpg)
-
-#### 3. Bar Chart Distribution
-
-![Bar Chart Distribution](product-display-img/柱状图分布.jpg)
-
-### Smart Analysis
-
-#### 4. User Voice Analysis
-
-![User Voice Analysis](product-display-img/用户心声分析.jpg)
-
-#### 5. Action Recommendations
-
-![Action Recommendations](product-display-img/行动建议.jpg)
-
-### Other
-
-#### 6. Data Upload Interface
-
-![Data Upload Interface](product-display-img/数据上传界面.jpg)
-
-#### 7. Boundary Testing
-
-![Boundary Testing](product-display-img/边界测试.jpg)
-
----
-
 ## Project Structure
 
 ```text
@@ -473,6 +435,44 @@ The backend enforces `ALLOWED_COLUMNS` and `ALLOWED_AGGREGATIONS` whitelists wit
 
 - **Sales data (MySQL)** — CSV upload triggers a full replace into the `sales_orders` table
 - **Review data (MySQL + ChromaDB)** — Batch insert into `reviews`; vector writes to Chroma are **chunked in batches of 500** with **asyncio concurrency (10 workers)**
+
+---
+
+## Product Preview
+
+### Data Visualization
+
+#### 1. Pie Chart Comparison
+
+![Pie Chart Comparison](product-display-img/饼状图对比.jpg)
+
+#### 2. Line Chart Trend
+
+![Line Chart Trend](product-display-img/曲线图趋势.jpg)
+
+#### 3. Bar Chart Distribution
+
+![Bar Chart Distribution](product-display-img/柱状图分布.jpg)
+
+### Smart Analysis
+
+#### 4. User Voice Analysis
+
+![User Voice Analysis](product-display-img/用户心声分析.jpg)
+
+#### 5. Action Recommendations
+
+![Action Recommendations](product-display-img/行动建议.jpg)
+
+### Other
+
+#### 6. Data Upload Interface
+
+![Data Upload Interface](product-display-img/数据上传界面.jpg)
+
+#### 7. Boundary Testing
+
+![Boundary Testing](product-display-img/边界测试.jpg)
 
 ---
 

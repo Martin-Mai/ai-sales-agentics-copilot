@@ -121,17 +121,28 @@ async def _clear_comments_collection() -> None:
         await asyncio.to_thread(collection.delete, ids=ids)
 
 
-async def _write_reviews_to_chroma(records: list[dict]) -> int:
+async def _write_reviews_to_chroma(
+    records: list[dict],
+    order_map: dict[str, dict],
+) -> int:
     semaphore = asyncio.Semaphore(CHROMA_CONCURRENCY)
 
     async def _add_one(record: dict) -> None:
         async with semaphore:
+            order = order_map.get(str(record["order_id"]), {})
+            order_date = order.get("order_date")
+            if hasattr(order_date, "isoformat"):
+                order_date = order_date.isoformat()
             await add_comment_to_chroma(
                 review_id=str(record["review_id"]),
                 order_id=str(record["order_id"]),
                 comment=str(record["comment"]),
                 rating=int(record["rating"]),
                 sentiment=str(record["sentiment"]),
+                region=str(order.get("region") or ""),
+                order_date=str(order_date or ""),
+                channel=str(order.get("channel") or ""),
+                product_category=str(order.get("product_category") or ""),
             )
 
     total_written = 0
@@ -231,7 +242,23 @@ async def upload_reviews(
             stmt = insert(Review).values(records)
             await session.execute(stmt)
 
-        chroma_written = await _write_reviews_to_chroma(records) if records else 0
+        order_map: dict[str, dict] = {}
+        if records:
+            order_ids = list({str(r["order_id"]) for r in records})
+            order_rows = await session.execute(
+                select(SalesOrder).where(SalesOrder.order_id.in_(order_ids))
+            )
+            for order in order_rows.scalars():
+                order_map[order.order_id] = {
+                    "region": order.region,
+                    "order_date": order.order_date,
+                    "channel": order.channel,
+                    "product_category": order.product_category,
+                }
+
+        chroma_written = (
+            await _write_reviews_to_chroma(records, order_map) if records else 0
+        )
         await session.commit()
         return {
             "inserted": len(records),

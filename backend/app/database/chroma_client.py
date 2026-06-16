@@ -64,6 +64,11 @@ async def add_comment_to_chroma(
     comment: str,
     rating: int,
     sentiment: str,
+    *,
+    region: str = "",
+    order_date: str = "",
+    channel: str = "",
+    product_category: str = "",
 ) -> None:
     embeddings = await embedding_model.embed_texts([comment])
     collection = await get_comments_collection()
@@ -71,6 +76,10 @@ async def add_comment_to_chroma(
         "order_id": order_id,
         "rating": rating,
         "sentiment": sentiment,
+        "region": region,
+        "order_date": order_date,
+        "channel": channel,
+        "product_category": product_category,
     }
     await asyncio.to_thread(
         collection.add,

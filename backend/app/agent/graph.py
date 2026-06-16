@@ -31,11 +31,28 @@ from app.agent.prompts import (
     PLANNER_PROMPT_TEMPLATE,
     SQL_INTENT_PROMPT_TEMPLATE,
 )
-from app.agent.tools import SQLIntent, SQLTool, VectorQuery, VectorTool
+from app.agent.sql_intent_utils import (
+    build_analysis_time_scope,
+    build_data_date_range_hint,
+    build_no_data_message,
+    build_year_clarification_message,
+    describe_filter_criteria,
+    has_no_matching_orders,
+    infer_group_by_from_query,
+    merge_date_filters,
+    requires_sql_first,
+    requires_year_clarification,
+)
+from app.agent.tools import (
+    SQLIntent,
+    SQLTool,
+    VectorTool,
+    fetch_filtered_order_date_range,
+    fetch_order_date_range,
+    fetch_reviews_for_agent,
+)
 from app.config import settings
 from app.database.mysql_client import AsyncSessionLocal
-
-REVIEW_KEYWORDS = ("评价", "评论", "反馈", "用户说", "看法", "为什么", "原因", "舆情", "口碑", "满意度")
 
 _client = AsyncOpenAI(
     api_key=settings.llm_api_key,
@@ -51,11 +68,15 @@ class AgentState(TypedDict):
     memories: list[str]
     sql_result: Any
     sql_group_by: Optional[str]
+    sql_filters: list[dict]
+    analysis_time_scope: str
     reviews: list[str]
+    reviews_scope: str
     insight: str
     chart_spec: Any
     step_count: int
     error: Optional[str]
+    no_data: NotRequired[bool]
     planned_tool: NotRequired[str]
 
 
@@ -169,30 +190,92 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> AgentState:
     return state
 
 
+async def year_clarify_node(state: AgentState, config: RunnableConfig) -> AgentState:
+    await _emit_event(config, {"event": "node_start", "node": "year_clarify"})
+    state["step_count"] = state.get("step_count", 0) + 1
+    message = build_year_clarification_message(state["user_query"])
+    state["insight"] = message
+    state["error"] = None
+    await _emit_event(config, {"event": "text_chunk", "text": message})
+    return state
+
+
+async def no_data_node(state: AgentState, config: RunnableConfig) -> AgentState:
+    await _emit_event(config, {"event": "node_start", "node": "no_data"})
+    state["step_count"] = state.get("step_count", 0) + 1
+    message = state.get("insight") or "当前查询条件下无匹配订单数据。"
+    state["insight"] = message
+    state["no_data"] = True
+    state["error"] = None
+    await _emit_event(config, {"event": "text_chunk", "text": message})
+    return state
+
+
 async def sql_node(state: AgentState, config: RunnableConfig) -> AgentState:
     await _emit_event(config, {"event": "node_start", "node": "sql_tool"})
     state["step_count"] = state.get("step_count", 0) + 1
 
-    intent_prompt = SQL_INTENT_PROMPT_TEMPLATE.format(
-        allowed_columns=", ".join(sorted(ALLOWED_COLUMNS)),
-        user_query=state["user_query"],
-    )
-
     try:
-        intent = await _json_mode_completion(
-            [{"role": "user", "content": intent_prompt}],
-            SQLIntent,
-        )
         async with AsyncSessionLocal() as session:
+            min_date, max_date = await fetch_order_date_range(session)
+            data_date_range_hint = build_data_date_range_hint(min_date, max_date)
+            intent_prompt = SQL_INTENT_PROMPT_TEMPLATE.format(
+                allowed_columns=", ".join(sorted(ALLOWED_COLUMNS)),
+                data_date_range_hint=data_date_range_hint,
+                user_query=state["user_query"],
+            )
+
+            intent = await _json_mode_completion(
+                [{"role": "user", "content": intent_prompt}],
+                SQLIntent,
+            )
+            corrected_filters = merge_date_filters(state["user_query"], intent.filters)
+            corrected_group_by = infer_group_by_from_query(
+                state["user_query"], intent.group_by
+            )
+            if corrected_filters != intent.filters or corrected_group_by != intent.group_by:
+                intent = intent.model_copy(
+                    update={"filters": corrected_filters, "group_by": corrected_group_by}
+                )
+
             tool = SQLTool(session)
             result = await tool.run(intent)
+
+            filtered_min, filtered_max = await fetch_filtered_order_date_range(
+                session, intent.filters
+            )
+            if has_no_matching_orders(intent.filters, filtered_min, filtered_max):
+                message = build_no_data_message(intent.filters, min_date, max_date)
+                state["sql_result"] = None
+                state["sql_group_by"] = intent.group_by
+                state["sql_filters"] = intent.filters
+                state["analysis_time_scope"] = (
+                    f"查询条件（{describe_filter_criteria(intent.filters)}）无匹配订单。"
+                )
+                state["insight"] = message
+                state["no_data"] = True
+                state["error"] = None
+                await _emit_event(config, {"event": "sql_result", "data": None})
+                return state
+
+            state["analysis_time_scope"] = build_analysis_time_scope(
+                state["user_query"],
+                intent.filters,
+                filtered_min,
+                filtered_max,
+            )
         state["sql_result"] = result
         state["sql_group_by"] = intent.group_by
+        state["sql_filters"] = intent.filters
+        state["no_data"] = False
         state["error"] = None
         await _emit_event(config, {"event": "sql_result", "data": result})
     except Exception as exc:
         state["sql_result"] = None
         state["sql_group_by"] = None
+        state["sql_filters"] = []
+        state["analysis_time_scope"] = ""
+        state["no_data"] = False
         state["error"] = str(exc)
 
     return state
@@ -203,14 +286,22 @@ async def vector_node(state: AgentState, config: RunnableConfig) -> AgentState:
     state["step_count"] = state.get("step_count", 0) + 1
 
     try:
-        tool = VectorTool()
-        query = VectorQuery(query=state["user_query"], top_k=5)
-        reviews = await tool.run(query)
+        async with AsyncSessionLocal() as session:
+            reviews, reviews_scope = await fetch_reviews_for_agent(
+                session,
+                user_query=state["user_query"],
+                sql_filters=state.get("sql_filters") or [],
+                has_sql_context=state.get("sql_result") is not None,
+                analysis_time_scope=state.get("analysis_time_scope") or "",
+                top_k=5,
+            )
         state["reviews"] = reviews
+        state["reviews_scope"] = reviews_scope
         state["error"] = None
         await _emit_event(config, {"event": "reviews", "data": reviews})
     except Exception as exc:
         state["reviews"] = []
+        state["reviews_scope"] = ""
         state["error"] = str(exc)
 
     return state
@@ -290,6 +381,8 @@ async def insight_node(state: AgentState, config: RunnableConfig) -> AgentState:
         if state.get("reviews")
         else "无"
     )
+    reviews_scope = state.get("reviews_scope") or ""
+    reviews_section = reviews_scope + "\n" + reviews_display if reviews_scope else reviews_display
 
     chart_spec = state.get("chart_spec")
     if chart_spec:
@@ -303,12 +396,15 @@ async def insight_node(state: AgentState, config: RunnableConfig) -> AgentState:
     else:
         chart_section = ""
 
+    analysis_time_section = state.get("analysis_time_scope") or "未执行 SQL 查询，无分析时间范围。"
+
     prompt = INSIGHT_PROMPT_TEMPLATE.format(
         user_query=state["user_query"],
         context_section=context_section,
         chart_section=chart_section,
+        analysis_time_section=analysis_time_section,
         sql_result=sql_display_str,
-        reviews=reviews_display,
+        reviews=reviews_section,
     )
 
     if state.get("error") and not sql_display and not state.get("reviews"):
@@ -339,7 +435,13 @@ async def insight_node(state: AgentState, config: RunnableConfig) -> AgentState:
     return state
 
 
-def route_after_planner(state: AgentState) -> Literal["sql_tool", "vector_tool", "insight"]:
+def route_after_planner(
+    state: AgentState,
+) -> Literal["year_clarify", "sql_tool", "vector_tool", "insight"]:
+    if requires_year_clarification(state["user_query"]):
+        return "year_clarify"
+    if requires_sql_first(state["user_query"]):
+        return "sql_tool"
     tool = state.get("planned_tool", "insight")
     if tool == "sql_tool":
         return "sql_tool"
@@ -348,9 +450,13 @@ def route_after_planner(state: AgentState) -> Literal["sql_tool", "vector_tool",
     return "insight"
 
 
-def route_after_sql(state: AgentState) -> Literal["vector_tool", "chart_spec", "insight"]:
-    query = state["user_query"]
-    if any(kw in query for kw in REVIEW_KEYWORDS) and not state.get("reviews"):
+def route_after_sql(
+    state: AgentState,
+) -> Literal["no_data", "vector_tool", "chart_spec", "insight"]:
+    if state.get("no_data"):
+        return "no_data"
+    # SQL 查询后始终补充用户评论，供洞察报告「用户心声解读」使用
+    if not state.get("reviews"):
         return "vector_tool"
     if is_chartable_sql_result(state.get("sql_result")):
         return "chart_spec"
@@ -367,6 +473,8 @@ def build_graph():
     workflow = StateGraph(AgentState)
 
     workflow.add_node("planner", planner_node)
+    workflow.add_node("year_clarify", year_clarify_node)
+    workflow.add_node("no_data", no_data_node)
     workflow.add_node("sql_tool", sql_node)
     workflow.add_node("vector_tool", vector_node)
     workflow.add_node("chart_spec", chart_node)
@@ -376,12 +484,24 @@ def build_graph():
     workflow.add_conditional_edges(
         "planner",
         route_after_planner,
-        {"sql_tool": "sql_tool", "vector_tool": "vector_tool", "insight": "insight"},
+        {
+            "year_clarify": "year_clarify",
+            "sql_tool": "sql_tool",
+            "vector_tool": "vector_tool",
+            "insight": "insight",
+        },
     )
+    workflow.add_edge("year_clarify", END)
+    workflow.add_edge("no_data", END)
     workflow.add_conditional_edges(
         "sql_tool",
         route_after_sql,
-        {"vector_tool": "vector_tool", "chart_spec": "chart_spec", "insight": "insight"},
+        {
+            "no_data": "no_data",
+            "vector_tool": "vector_tool",
+            "chart_spec": "chart_spec",
+            "insight": "insight",
+        },
     )
     workflow.add_conditional_edges(
         "vector_tool",

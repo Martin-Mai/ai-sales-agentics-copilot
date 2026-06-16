@@ -244,7 +244,7 @@ def test_chat_stream_api() -> bool:
     ok, _, _ = consume_chat_stream(
         session,
         conv_combo,
-        "9月份哪个区域销售额最低？为什么？",
+        "2025年9月份哪个区域销售额最低？为什么？",
         "流式对话 — SQL+Vector 组合查询",
     )
     all_passed = all_passed and ok
@@ -252,7 +252,7 @@ def test_chat_stream_api() -> bool:
     all_passed = all_passed and verify_messages(
         session,
         conv_combo,
-        "9月份哪个区域销售额最低？为什么？",
+        "2025年9月份哪个区域销售额最低？为什么？",
         "验证组合测试消息持久化",
     )
 

@@ -31,10 +31,83 @@
 
 - **多节点 Agent 工作流** — Planner → SQL Tool / Vector Tool → Chart Spec → Insight，固定拓扑、路径有界
 - **安全可控的数据查询** — LLM 输出结构化 `SQLIntent`，后端经白名单校验后由 SQLAlchemy Core 动态构建 SQL，拦截越权查询与注入风险
-- **混合检索** — MySQL 存储销售订单，ChromaDB 存储评论向量；支持纯定量统计、纯舆情检索及「数据 + 评论」归因分析链路
-- **流式响应** — SSE 推送节点状态（`node_start`、`sql_result`、`reviews`、`chart_spec`）与 Insight 逐字输出
+- **智能意图后处理** — `sql_intent_utils` 从用户问题中可靠提取日期过滤、识别混合归因问题（销售 + 满意度优先走 SQL），并在未指定年份时主动追问
+- **混合检索与归因分析** — MySQL 存储销售订单，ChromaDB 存储评论向量；SQL 查询后自动补充相关评论，支撑「数据 + 用户心声」联合洞察
+- **流式响应** — SSE 推送节点状态（`node_start`、`planner_decision`、`sql_result`、`reviews`、`chart_spec`）与 Insight 逐字输出
 - **智能可视化** — LLM 结合规则选择柱状图 / 折线图 / 扇形图，生成 Chart Spec 并由 Recharts 渲染
 - **前端聊天界面** — 会话管理、CSV 拖拽上传、流式打字机效果、图表动态嵌入消息
+
+---
+
+## 产品预览
+
+### 可视化数据分析
+
+#### 1. 饼状图对比
+
+![饼状图对比](product-display-img/饼状图对比.jpg)
+
+#### 2. 曲线图趋势
+
+![曲线图趋势](product-display-img/曲线图趋势.jpg)
+
+#### 3. 柱状图分布
+
+![柱状图分布](product-display-img/柱状图分布.jpg)
+
+### 智能分析
+
+#### 4. 用户心声分析
+
+![用户心声分析](product-display-img/用户心声分析.jpg)
+
+#### 5. 行动建议
+
+![行动建议](product-display-img/行动建议.jpg)
+
+### 其他
+
+#### 6. 数据上传界面
+
+![数据上传界面](product-display-img/数据上传界面.jpg)
+
+#### 7. 边界测试
+
+![边界测试](product-display-img/边界测试.jpg)
+
+---
+
+## 项目结构
+
+```text
+ai-sales-agentics-copilot/
+├── backend/
+│   ├── app/
+│   │   ├── agent/              # LangGraph 工作流、工具、图表与 SQL 意图后处理
+│   │   │   ├── graph.py        # Agent 状态图与节点路由
+│   │   │   ├── tools.py        # SQL Tool / Vector Tool
+│   │   │   ├── charts.py       # 图表规格构建与类型推断
+│   │   │   ├── sql_intent_utils.py  # 日期过滤、年份追问、混合归因路由
+│   │   │   └── prompts.py      # 提示词模板与白名单常量
+│   │   ├── api/                # FastAPI 路由（chat / conversation / upload）
+│   │   ├── database/           # MySQL + ChromaDB 客户端
+│   │   ├── models/             # ORM 模型
+│   │   ├── repositories/       # 数据访问层
+│   │   └── services/           # 业务服务
+│   ├── test/                   # 后端测试（路由、图表、SSE、Demo 问题等）
+│   ├── 数据测试/                # 测试数据生成脚本
+│   ├── requirements.txt
+│   └── run.py
+├── frontend/
+│   ├── src/
+│   │   ├── components/         # 聊天、图表、侧边栏组件
+│   │   ├── pages/              # Chat、Upload 页面
+│   │   ├── services/           # API 与 SSE 客户端
+│   │   └── utils/              # 图表消息解析等工具
+│   └── package.json
+├── product-display-img/        # 产品预览截图
+└── README.md
+```
 
 ---
 
@@ -44,20 +117,23 @@
 
 ```text
 planner
-  ├─ sql_tool ──┬─ vector_tool ──┬─ chart_spec ── insight ── END
+  ├─ year_clarify ────────────────────────────── END
+  ├─ sql_tool ──┬─ no_data ───────────────────── END
+  │             ├─ vector_tool ──┬─ chart_spec ── insight ── END
   │             │                └─ insight ──────────────── END
   │             ├─ chart_spec ── insight ── END
   │             └─ insight ──────────────── END
   ├─ vector_tool ──┬─ chart_spec ── insight ── END
   │                └─ insight ──────────────── END
-  └─ insight ──────────────────────────────── END
+  └─ insight ─────────────────────────────────── END
 ```
 
-- **Planner**：根据用户问题路由至 `sql_tool`、`vector_tool` 或直接 `insight`
-- **SQL Tool**：解析自然语言为 `SQLIntent`，白名单校验列名与操作符后执行聚合查询
-- **Vector Tool**：BGE 嵌入 + ChromaDB 语义检索，默认返回 Top-5 相关评论
+- **Planner**：根据用户问题路由至 `sql_tool`、`vector_tool` 或直接 `insight`；混合销售 + 满意度问题强制优先 SQL
+- **Year Clarify**：用户提到具体月份但未指定年份时，直接追问并结束本轮
+- **SQL Tool**：解析自然语言为 `SQLIntent`，白名单校验列名与操作符后执行聚合查询；无匹配数据时进入 `no_data` 节点
+- **Vector Tool**：BGE 嵌入 + ChromaDB 语义检索；SQL 查询后自动补充评论，供洞察报告「用户心声解读」使用
 - **Chart Spec**：对可图表化的分组 SQL 结果，LLM 选图 + 规则降级（时间序列优先折线、类别过多降级柱状图）
-- **Insight**：融合 SQL 结果、评论与图表信息，流式生成商业洞察报告
+- **Insight**：融合 SQL 结果、评论与图表信息，流式生成含行动建议的商业洞察报告
 
 ### 安全查询设计
 
@@ -72,7 +148,7 @@ LLM **不直接生成 SQL 字符串**，而是输出受 Pydantic 约束的查询
 }
 ```
 
-后端通过 `ALLOWED_COLUMNS`、`ALLOWED_AGGREGATIONS` 白名单与操作符映射，用 SQLAlchemy Core 安全构建并执行查询。
+后端通过 `ALLOWED_COLUMNS`、`ALLOWED_AGGREGATIONS` 白名单与操作符映射，用 SQLAlchemy Core 安全构建并执行查询；`sql_intent_utils` 进一步从用户原文修正日期过滤与分组维度。
 
 ### 数据入库策略
 
@@ -166,6 +242,7 @@ python generate_test_data.py
 - 「各区域销售额对比」
 - 「2024 年各月销售额趋势」
 - 「华东区销售低的原因，用户怎么说？」
+- 「9月份哪个区域销售额最低？」（系统将追问年份）
 
 ---
 
@@ -234,33 +311,6 @@ python generate_test_data.py
 
 ---
 
-## 项目结构
-
-```text
-ai-sales-agentics-copilot/
-├── backend/
-│   ├── app/
-│   │   ├── agent/          # LangGraph 工作流、工具、图表逻辑
-│   │   ├── api/            # FastAPI 路由（chat / conversation / upload）
-│   │   ├── database/       # MySQL + ChromaDB 客户端
-│   │   ├── models/         # ORM 模型
-│   │   ├── repositories/   # 数据访问层
-│   │   └── services/       # 业务服务
-│   ├── test/               # 后端测试
-│   ├── 数据测试/            # 测试数据生成脚本
-│   ├── requirements.txt
-│   └── run.py
-├── frontend/
-│   ├── src/
-│   │   ├── components/     # 聊天、图表、侧边栏组件
-│   │   ├── pages/          # Chat、Upload 页面
-│   │   └── services/       # API 与 SSE 客户端
-│   └── package.json
-└── README.md
-```
-
----
-
 ## License
 
 See [LICENSE](LICENSE).
@@ -300,10 +350,83 @@ Powered by a **LangGraph** multi-node Agent workflow, the system orchestrates **
 
 - **Multi-node Agent workflow** — Planner → SQL Tool / Vector Tool → Chart Spec → Insight, with a fixed topology and bounded execution paths
 - **Safe, controlled data queries** — LLM outputs structured `SQLIntent`; the backend validates against whitelists and builds SQL via SQLAlchemy Core, blocking unauthorized queries and injection risks
-- **Hybrid retrieval** — MySQL for sales orders, ChromaDB for review vectors; supports pure quantitative stats, sentiment retrieval, and combined attribution analysis
-- **Streaming responses** — SSE pushes node status (`node_start`, `sql_result`, `reviews`, `chart_spec`) and token-by-token Insight output
+- **Smart intent post-processing** — `sql_intent_utils` reliably extracts date filters from user queries, detects mixed attribution questions (sales + satisfaction → SQL first), and prompts for year when only a month is mentioned
+- **Hybrid retrieval & attribution** — MySQL for sales orders, ChromaDB for review vectors; SQL queries are automatically followed by relevant review retrieval for combined data + user-voice insights
+- **Streaming responses** — SSE pushes node status (`node_start`, `planner_decision`, `sql_result`, `reviews`, `chart_spec`) and token-by-token Insight output
 - **Intelligent visualization** — LLM + rule-based chart type selection (bar / line / pie), Chart Spec generation, and Recharts rendering
 - **Chat UI** — Session management, CSV drag-and-drop upload, typewriter streaming effect, and inline chart rendering
+
+---
+
+## Product Preview
+
+### Data Visualization
+
+#### 1. Pie Chart Comparison
+
+![Pie Chart Comparison](product-display-img/饼状图对比.jpg)
+
+#### 2. Line Chart Trend
+
+![Line Chart Trend](product-display-img/曲线图趋势.jpg)
+
+#### 3. Bar Chart Distribution
+
+![Bar Chart Distribution](product-display-img/柱状图分布.jpg)
+
+### Smart Analysis
+
+#### 4. User Voice Analysis
+
+![User Voice Analysis](product-display-img/用户心声分析.jpg)
+
+#### 5. Action Recommendations
+
+![Action Recommendations](product-display-img/行动建议.jpg)
+
+### Other
+
+#### 6. Data Upload Interface
+
+![Data Upload Interface](product-display-img/数据上传界面.jpg)
+
+#### 7. Boundary Testing
+
+![Boundary Testing](product-display-img/边界测试.jpg)
+
+---
+
+## Project Structure
+
+```text
+ai-sales-agentics-copilot/
+├── backend/
+│   ├── app/
+│   │   ├── agent/              # LangGraph workflow, tools, charts, SQL intent post-processing
+│   │   │   ├── graph.py        # Agent state graph and node routing
+│   │   │   ├── tools.py        # SQL Tool / Vector Tool
+│   │   │   ├── charts.py       # Chart spec building and type inference
+│   │   │   ├── sql_intent_utils.py  # Date filters, year clarification, mixed attribution routing
+│   │   │   └── prompts.py      # Prompt templates and whitelist constants
+│   │   ├── api/                # FastAPI routes (chat / conversation / upload)
+│   │   ├── database/           # MySQL + ChromaDB clients
+│   │   ├── models/             # ORM models
+│   │   ├── repositories/       # Data access layer
+│   │   └── services/           # Business services
+│   ├── test/                   # Backend tests (routing, charts, SSE, demo questions, etc.)
+│   ├── 数据测试/                # Test data generation scripts
+│   ├── requirements.txt
+│   └── run.py
+├── frontend/
+│   ├── src/
+│   │   ├── components/         # Chat, chart, sidebar components
+│   │   ├── pages/              # Chat, Upload pages
+│   │   ├── services/           # API and SSE client
+│   │   └── utils/              # Chart message parsing utilities
+│   └── package.json
+├── product-display-img/        # Product preview screenshots
+└── README.md
+```
 
 ---
 
@@ -313,20 +436,23 @@ Powered by a **LangGraph** multi-node Agent workflow, the system orchestrates **
 
 ```text
 planner
-  ├─ sql_tool ──┬─ vector_tool ──┬─ chart_spec ── insight ── END
+  ├─ year_clarify ────────────────────────────── END
+  ├─ sql_tool ──┬─ no_data ───────────────────── END
+  │             ├─ vector_tool ──┬─ chart_spec ── insight ── END
   │             │                └─ insight ──────────────── END
   │             ├─ chart_spec ── insight ── END
   │             └─ insight ──────────────── END
   ├─ vector_tool ──┬─ chart_spec ── insight ── END
   │                └─ insight ──────────────── END
-  └─ insight ──────────────────────────────── END
+  └─ insight ─────────────────────────────────── END
 ```
 
-- **Planner** — Routes user queries to `sql_tool`, `vector_tool`, or directly to `insight`
-- **SQL Tool** — Parses natural language into `SQLIntent`, validates columns/operators against whitelists, and executes aggregation queries
-- **Vector Tool** — BGE embeddings + ChromaDB semantic search, returning Top-5 relevant reviews by default
+- **Planner** — Routes user queries to `sql_tool`, `vector_tool`, or directly to `insight`; mixed sales + satisfaction questions are forced to SQL first
+- **Year Clarify** — When the user mentions a month without a year, prompts for clarification and ends the turn
+- **SQL Tool** — Parses natural language into `SQLIntent`, validates columns/operators against whitelists, and executes aggregation queries; routes to `no_data` when no matching records exist
+- **Vector Tool** — BGE embeddings + ChromaDB semantic search; automatically supplements reviews after SQL queries for user-voice analysis in the insight report
 - **Chart Spec** — For groupable SQL results, LLM selects chart type with rule-based fallbacks (time series → line, too many categories → bar)
-- **Insight** — Streams a business insight report synthesizing SQL results, reviews, and chart context
+- **Insight** — Streams a business insight report synthesizing SQL results, reviews, chart context, and actionable recommendations
 
 ### Safe Query Design
 
@@ -341,7 +467,7 @@ The LLM **does not generate raw SQL strings**. Instead, it outputs Pydantic-cons
 }
 ```
 
-The backend enforces `ALLOWED_COLUMNS` and `ALLOWED_AGGREGATIONS` whitelists with operator mapping, then safely builds and executes queries via SQLAlchemy Core.
+The backend enforces `ALLOWED_COLUMNS` and `ALLOWED_AGGREGATIONS` whitelists with operator mapping, then safely builds and executes queries via SQLAlchemy Core; `sql_intent_utils` further corrects date filters and group-by dimensions from the original user query.
 
 ### Data Ingestion Strategy
 
@@ -435,6 +561,7 @@ Visit `http://localhost:5173`, create a session, and try questions like:
 - "Compare sales revenue across regions"
 - "Monthly sales revenue trend for 2024"
 - "Why are sales low in East China? What are users saying?"
+- "Which region had the lowest sales in September?" (the system will ask for the year)
 
 ---
 
@@ -500,33 +627,6 @@ All business endpoints are prefixed with `/api/v1`.
 |--------|------|-------------|
 | `POST` | `/api/v1/upload/sales` | Upload sales CSV (`multipart/form-data`, field name `file`) |
 | `POST` | `/api/v1/upload/reviews` | Upload reviews CSV (writes to both MySQL and ChromaDB) |
-
----
-
-## Project Structure
-
-```text
-ai-sales-agentics-copilot/
-├── backend/
-│   ├── app/
-│   │   ├── agent/          # LangGraph workflow, tools, chart logic
-│   │   ├── api/            # FastAPI routes (chat / conversation / upload)
-│   │   ├── database/       # MySQL + ChromaDB clients
-│   │   ├── models/         # ORM models
-│   │   ├── repositories/   # Data access layer
-│   │   └── services/       # Business services
-│   ├── test/               # Backend tests
-│   ├── 数据测试/            # Test data generation scripts
-│   ├── requirements.txt
-│   └── run.py
-├── frontend/
-│   ├── src/
-│   │   ├── components/     # Chat, chart, sidebar components
-│   │   ├── pages/          # Chat, Upload pages
-│   │   └── services/       # API and SSE client
-│   └── package.json
-└── README.md
-```
 
 ---
 

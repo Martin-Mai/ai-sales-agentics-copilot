@@ -70,11 +70,15 @@ async def chat_stream(
         "memories": [],
         "sql_result": None,
         "sql_group_by": None,
+        "sql_filters": [],
+        "analysis_time_scope": "",
         "reviews": [],
+        "reviews_scope": "",
         "insight": "",
         "chart_spec": None,
         "step_count": 0,
         "error": None,
+        "no_data": False,
     }
 
     queue: asyncio.Queue = asyncio.Queue()
